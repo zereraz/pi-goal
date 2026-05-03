@@ -503,6 +503,9 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 
 			const goal = setGoal(objective, tokenBudget, ctx);
 			ctx.ui.notify(`🎯 Goal set: ${goal.objective}`, "info");
+
+			// Send the objective as a user message so the agent starts working on it
+			pi.sendUserMessage(goal.objective);
 		},
 	});
 
