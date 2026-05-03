@@ -32,15 +32,34 @@ Sets an objective for your session that the agent tracks and stays focused on. L
 
 ## Installation
 
-Copy `src/index.ts` to your pi extensions directory:
+pi auto-discovers extensions from `~/.pi/agent/extensions/` (global) and `.pi/extensions/` (project-local).
+
+### Option 1: Symlink (recommended for development)
+
+```bash
+# Global — available in all projects
+ln -s "$(pwd)/src/index.ts" ~/.pi/agent/extensions/pi-goal.ts
+
+# Per-project
+mkdir -p .pi/extensions
+ln -s /path/to/pi-goal/src/index.ts .pi/extensions/pi-goal.ts
+```
+
+### Option 2: Directory extension
 
 ```bash
 # Global
-cp src/index.ts ~/.pi/agent/extensions/pi-goal.ts
-
-# Per-project
-cp src/index.ts .pi/extensions/pi-goal.ts
+ln -s "$(pwd)" ~/.pi/agent/extensions/pi-goal
+# (auto-discovers pi-goal/index.ts)
 ```
+
+### Option 3: Copy
+
+```bash
+cp src/index.ts ~/.pi/agent/extensions/pi-goal.ts
+```
+
+After installing, use `/reload` inside pi to pick it up without restarting.
 
 ## Usage
 
