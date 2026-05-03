@@ -1,87 +1,56 @@
 # pi-goal
 
-Goal tracking extension for [pi](https://github.com/mariozechner/pi-mono) — inspired by [Codex's `/goal` command](https://github.com/openai/codex).
+Goal tracking extension for [pi](https://github.com/badlogic/pi-mono) — inspired by [Codex's `/goal`](https://github.com/openai/codex).
 
-## What it does
+Sets an objective and the agent autonomously works toward it, continuing across turns until done.
 
-Sets an objective for your session that the agent tracks and stays focused on. Like Codex's goal system, but for pi.
+## How it works
 
-### Features
+```
+/goal Refactor auth module to use JWT
+```
 
-- **`/goal <objective>`** — Set a goal (optionally with `--budget 50k` for token limits)
-- **`/goal`** — Interactive goal status menu (pause, resume, complete, clear)
-- **`/goal clear|pause|resume|complete|status`** — Quick status changes
-- **`goal` tool** — LLM can read/update goal status programmatically
-- **System prompt injection** — Active goals are injected into the system prompt to keep the agent focused
-- **Footer status** — Shows `🎯 objective [time • tokens]` in the status bar
-- **Session persistence** — Goals survive across branches via session entries
-- **Token budget** — Optional token budget with auto-pause when exceeded
+1. Sets the goal and sends the objective to the agent
+2. Agent works on it, then finishes the turn
+3. After 2s idle, a **continuation prompt** auto-sends — agent keeps going
+4. Loop continues until the agent calls `update_goal(status: "complete")` or you `/goal pause`
 
-### Codex Parity
+The agent sees the goal in its system prompt every turn, gets `update_goal` and `get_goal` tools, and receives a structured continuation prompt (ported from Codex) that includes objective, time/token budgets, and completion audit instructions.
 
-| Codex Feature | pi-goal |
+## Commands
+
+| Command | Action |
 |---|---|
-| `/goal <objective>` | ✅ `/goal <objective>` |
-| Goal status (active/paused/complete/budget-limited) | ✅ active/paused/complete |
-| Token tracking | ✅ Per-turn estimation |
-| Token budget | ✅ `--budget 50k` |
-| Time tracking | ✅ Elapsed since creation |
-| Goal summary menu | ✅ Interactive TUI component |
-| Replace confirmation | ✅ Confirms before replacing active goal |
-| Clear goal | ✅ `/goal clear` |
+| `/goal <objective>` | Set goal, start working |
+| `/goal <objective> --budget 50k` | Set goal with token budget |
+| `/goal` | Interactive status menu |
+| `/goal pause` | Pause (stops auto-continuation) |
+| `/goal resume` | Resume (restarts auto-continuation) |
+| `/goal clear` | Remove goal |
+| `/goal status` | Show status |
 
-## Installation
-
-pi auto-discovers extensions from `~/.pi/agent/extensions/` (global) and `.pi/extensions/` (project-local).
-
-### Option 1: Symlink (recommended for development)
+## Install
 
 ```bash
-# Global — available in all projects
-ln -s "$(pwd)/src/index.ts" ~/.pi/agent/extensions/pi-goal.ts
+# Symlink globally (recommended)
+ln -s /path/to/pi-goal/src/index.ts ~/.pi/agent/extensions/pi-goal.ts
 
-# Per-project
-mkdir -p .pi/extensions
-ln -s /path/to/pi-goal/src/index.ts .pi/extensions/pi-goal.ts
+# Then /reload in any running pi session
 ```
 
-### Option 2: Directory extension
+## What the agent gets
 
-```bash
-# Global
-ln -s "$(pwd)" ~/.pi/agent/extensions/pi-goal
-# (auto-discovers pi-goal/index.ts)
+- **System prompt**: Active goal objective, status, time, token budget injected each turn
+- **`update_goal` tool**: Can only mark goal `complete` — pause/resume are user-controlled
+- **`get_goal` tool**: Read current goal status and budgets
+- **Continuation prompt**: Structured message with budget info and completion audit checklist
+- **Budget limit prompt**: When token budget exceeded, goal pauses with wrap-up instructions
+
+## Footer
+
+Shows in the status bar:
 ```
-
-### Option 3: Copy
-
-```bash
-cp src/index.ts ~/.pi/agent/extensions/pi-goal.ts
+🎯 Refactor auth module to... [2m • 1.5K/50K]
+⏸ Refactor auth module to... (paused)
+⚠️ Refactor auth module to... (budget limited)
 ```
-
-After installing, use `/reload` inside pi to pick it up without restarting.
-
-## Usage
-
-```
-/goal Build a REST API for user management
-/goal Build the frontend --budget 100k
-/goal          # Show status menu
-/goal pause    # Pause the goal
-/goal resume   # Resume it
-/goal complete # Mark done
-/goal clear    # Remove goal
-```
-
-The LLM also has access to a `goal` tool and will see the active goal in its system prompt.
-
-## Architecture
-
-Follows pi-mono extension patterns:
-- `pi.registerCommand("goal", ...)` — Slash command with subcommand autocomplete
-- `pi.registerTool(...)` — LLM-callable tool with custom call/result renderers
-- `pi.appendEntry("pi-goal", ...)` — State persistence via session entries
-- `pi.on("before_agent_start", ...)` — System prompt injection
-- `pi.on("turn_end", ...)` — Token tracking
-- `ctx.ui.custom(...)` — Interactive TUI component for goal menu
-- `ctx.ui.setStatus("goal", ...)` — Footer status display
