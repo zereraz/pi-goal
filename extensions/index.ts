@@ -244,7 +244,10 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 				persistGoal("update");
 				updateFooterStatus(ctx);
 				// Steer agent to wrap up (like Codex's budget_limit steering)
-				pi.sendUserMessage(buildBudgetLimitPrompt(currentGoal));
+				pi.sendMessage(
+					{ customType: "pi-goal:budget-limit", content: buildBudgetLimitPrompt(currentGoal), display: false },
+					{ triggerTurn: true },
+				);
 				return;
 			}
 
@@ -279,7 +282,11 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 
 			// Don't send if agent is already streaming (user sent something)
 			// isIdle check prevents collision with user input
-			pi.sendUserMessage(buildContinuationPrompt(currentGoal));
+			// Hidden continuation — not shown in chat (like Codex's developer-role message)
+			pi.sendMessage(
+				{ customType: "pi-goal:continuation", content: buildContinuationPrompt(currentGoal), display: false },
+				{ triggerTurn: true },
+			);
 		}, CONTINUATION_DELAY_MS);
 	}
 
@@ -580,8 +587,9 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 			const goal = setGoal(objective, tokenBudget, ctx);
 			ctx.ui.notify(`🎯 Goal set: ${goal.objective}`, "info");
 
-			// Send the objective as the first user message to kick off work
-			pi.sendUserMessage(goal.objective);
+			// Kick off work via hidden continuation (not a visible user message).
+			// Codex: /goal just sets metadata, then the continuation loop starts.
+			scheduleContinuation();
 		},
 	});
 
