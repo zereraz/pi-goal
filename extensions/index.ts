@@ -254,25 +254,34 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 	});
 
 	// ── Auto-continuation: when agent finishes and goal is active ────────
+	//
+	// This is the core of the "Ralph loop" — after each agent_end, if the
+	// goal is still active, schedule a continuation turn. No suppression
+	// for no-tool turns (Codex removed that in #20523 because it caused
+	// goals to stop short).
 
 	pi.on("agent_end", async (_event, ctx) => {
-		if (!currentGoal || currentGoal.status !== "active") {
-			clearContinuationTimer();
-			updateFooterStatus(ctx);
-			return;
-		}
-
 		updateFooterStatus(ctx);
+		scheduleContinuation();
+	});
 
-		// Schedule continuation turn after delay
+	function scheduleContinuation() {
 		clearContinuationTimer();
+
+		// Only continue if goal is active
+		if (!currentGoal || currentGoal.status !== "active") return;
+
 		continuationTimer = setTimeout(() => {
 			continuationTimer = null;
-			if (currentGoal && currentGoal.status === "active") {
-				pi.sendUserMessage(buildContinuationPrompt(currentGoal));
-			}
+
+			// Re-check: goal may have been paused/cleared/completed during delay
+			if (!currentGoal || currentGoal.status !== "active") return;
+
+			// Don't send if agent is already streaming (user sent something)
+			// isIdle check prevents collision with user input
+			pi.sendUserMessage(buildContinuationPrompt(currentGoal));
 		}, CONTINUATION_DELAY_MS);
-	});
+	}
 
 	function clearContinuationTimer() {
 		if (continuationTimer) {
@@ -280,6 +289,14 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 			continuationTimer = null;
 		}
 	}
+
+	// ── Cancel continuation when user sends input ───────────────────────
+	// If user types something while continuation is pending, their input
+	// takes priority (matches Codex: pending user input suppresses continuation).
+
+	pi.on("input", async (_event, _ctx) => {
+		clearContinuationTimer();
+	});
 
 	// ── Inject goal context into system prompt ───────────────────────────
 
@@ -397,14 +414,9 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		persistGoal("update");
 		updateFooterStatus(ctx);
 
-		// If resumed to active and agent is idle, schedule continuation
+		// If resumed to active, schedule continuation (agent may be idle)
 		if (status === "active") {
-			continuationTimer = setTimeout(() => {
-				continuationTimer = null;
-				if (currentGoal && currentGoal.status === "active") {
-					pi.sendUserMessage(buildContinuationPrompt(currentGoal));
-				}
-			}, CONTINUATION_DELAY_MS);
+			scheduleContinuation();
 		}
 	};
 
