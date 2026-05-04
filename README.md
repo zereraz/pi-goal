@@ -1,8 +1,18 @@
 # pi-goal
 
-Goal tracking extension for [pi](https://github.com/badlogic/pi-mono) — inspired by [Codex's `/goal`](https://github.com/openai/codex).
+Codex-like `/goal` command for [pi](https://github.com/badlogic/pi-mono) — autonomous goal tracking with continuation loops.
 
-Sets an objective and the agent autonomously works toward it, continuing across turns until done.
+## Install
+
+```bash
+pi install https://github.com/zereraz/pi-goal
+```
+
+Or temporarily:
+
+```bash
+pi -e git:github.com/zereraz/pi-goal
+```
 
 ## How it works
 
@@ -11,11 +21,11 @@ Sets an objective and the agent autonomously works toward it, continuing across 
 ```
 
 1. Sets the goal and sends the objective to the agent
-2. Agent works on it, then finishes the turn
+2. Agent works on it, finishes the turn
 3. After 2s idle, a **continuation prompt** auto-sends — agent keeps going
 4. Loop continues until the agent calls `update_goal(status: "complete")` or you `/goal pause`
 
-The agent sees the goal in its system prompt every turn, gets `update_goal` and `get_goal` tools, and receives a structured continuation prompt (ported from Codex) that includes objective, time/token budgets, and completion audit instructions.
+The agent sees the goal in its system prompt every turn, gets `update_goal` and `get_goal` tools, and receives a structured continuation prompt (ported from Codex) with objective, budgets, and completion audit instructions.
 
 ## Commands
 
@@ -24,31 +34,21 @@ The agent sees the goal in its system prompt every turn, gets `update_goal` and 
 | `/goal <objective>` | Set goal, start working |
 | `/goal <objective> --budget 50k` | Set goal with token budget |
 | `/goal` | Interactive status menu |
-| `/goal pause` | Pause (stops auto-continuation) |
-| `/goal resume` | Resume (restarts auto-continuation) |
+| `/goal pause` | Pause (stops continuation) |
+| `/goal resume` | Resume (restarts continuation) |
 | `/goal clear` | Remove goal |
 | `/goal status` | Show status |
 
-## Install
-
-```bash
-# Symlink globally (recommended)
-ln -s /path/to/pi-goal/src/index.ts ~/.pi/agent/extensions/pi-goal.ts
-
-# Then /reload in any running pi session
-```
-
 ## What the agent gets
 
-- **System prompt**: Active goal objective, status, time, token budget injected each turn
-- **`update_goal` tool**: Can only mark goal `complete` — pause/resume are user-controlled
+- **System prompt**: Goal objective, status, time/token budget injected each turn
+- **`update_goal` tool**: Mark goal `complete` — pause/resume are user-controlled
 - **`get_goal` tool**: Read current goal status and budgets
-- **Continuation prompt**: Structured message with budget info and completion audit checklist
-- **Budget limit prompt**: When token budget exceeded, goal pauses with wrap-up instructions
+- **Continuation prompt**: Budget info + completion audit checklist (from Codex)
+- **Budget limit**: When token budget exceeded, goal auto-pauses with wrap-up instructions
 
-## Footer
+## Footer status
 
-Shows in the status bar:
 ```
 🎯 Refactor auth module to... [2m • 1.5K/50K]
 ⏸ Refactor auth module to... (paused)

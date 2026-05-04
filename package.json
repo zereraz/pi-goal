@@ -1,19 +1,29 @@
 {
   "name": "pi-goal",
   "version": "0.1.0",
-  "description": "Goal tracking extension for pi — inspired by Codex's /goal command",
-  "type": "module",
-  "main": "src/index.ts",
-  "scripts": {
-    "check": "tsc --noEmit"
+  "description": "Codex-like /goal command for pi — autonomous goal tracking with continuation loops",
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*"
   },
-  "keywords": ["pi", "extension", "goal", "codex"],
-  "license": "MIT",
-  "devDependencies": {
-    "@mariozechner/pi-coding-agent": "^0.30.2",
-    "@mariozechner/pi-ai": "^0.30.2",
-    "@mariozechner/pi-tui": "^0.30.2",
-    "typescript": "^5.9.2",
-    "typebox": "^0.34.33"
-  }
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zereraz/pi-goal.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zereraz/pi-goal/issues"
+  },
+  "homepage": "https://github.com/zereraz/pi-goal#readme",
+  "license": "MIT"
 }
