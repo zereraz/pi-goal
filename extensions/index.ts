@@ -343,10 +343,6 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 			ctx.ui.setStatus("goal", undefined);
 			return;
 		}
-		const obj =
-			currentGoal.objective.length > 30
-				? currentGoal.objective.slice(0, 27) + "..."
-				: currentGoal.objective;
 		const elapsed = formatElapsed(currentGoal.timeUsedMs);
 		const tokens = currentGoal.tokenBudget
 			? `${formatTokens(currentGoal.tokensUsed)}/${formatTokens(currentGoal.tokenBudget)}`
@@ -354,18 +350,28 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 
 		switch (currentGoal.status) {
 			case "active":
-				ctx.ui.setStatus("goal", `🎯 ${obj} [${elapsed} • ${tokens}]`);
+				if (currentGoal.tokenBudget) {
+					ctx.ui.setStatus("goal", `Pursuing goal (${tokens})`);
+				} else {
+					ctx.ui.setStatus("goal", `Pursuing goal (${elapsed})`);
+				}
 				break;
 			case "paused":
-				ctx.ui.setStatus("goal", `⏸ ${obj} (paused)`);
+				ctx.ui.setStatus("goal", `Goal paused (/goal resume)`);
 				break;
 			case "budget_limited":
-				ctx.ui.setStatus("goal", `⚠️ ${obj} (budget limited)`);
+				if (currentGoal.tokenBudget) {
+					ctx.ui.setStatus("goal", `Goal unmet (${tokens})`);
+				} else {
+					ctx.ui.setStatus("goal", `Goal unmet`);
+				}
 				break;
 			case "complete":
-				ctx.ui.setStatus("goal", `✅ ${obj} (complete)`);
-				// Clear after a bit
-				setTimeout(() => ctx.ui.setStatus("goal", undefined), 10_000);
+				if (currentGoal.tokenBudget) {
+					ctx.ui.setStatus("goal", `Goal achieved (${formatTokens(currentGoal.tokensUsed)} tokens)`);
+				} else {
+					ctx.ui.setStatus("goal", `Goal achieved (${elapsed})`);
+				}
 				break;
 		}
 	};
