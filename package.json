@@ -25,5 +25,8 @@
     "url": "https://github.com/zereraz/pi-goal/issues"
   },
   "homepage": "https://github.com/zereraz/pi-goal#readme",
+  "scripts": {
+    "test": "npx tsx --test 'extensions/__tests__/**/*.test.ts'"
+  },
   "license": "MIT"
 }
