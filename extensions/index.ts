@@ -593,6 +593,16 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			// Validate objective (matches Codex: max 4000 chars, collapse blank lines)
+			objective = objective.replace(/\n{3,}/g, "\n\n").trim();
+			if (objective.length > 4000) {
+				ctx.ui.notify(
+					"Goal objective must be at most 4000 characters",
+					"error",
+				);
+				return;
+			}
+
 			// Confirm replacement if active goal exists
 			if (
 				currentGoal &&
