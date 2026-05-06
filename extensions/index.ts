@@ -502,7 +502,9 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 					return;
 				}
 				if (currentGoal.status === "complete") {
-					ctx.ui.notify("Goal is complete. Set a new one with /goal <objective>", "info");
+					// User disagrees with completion — re-activate the goal loop
+					updateGoalStatus("active", ctx);
+					ctx.ui.notify("Goal re-activated — agent will continue working", "info");
 					return;
 				}
 				updateGoalStatus("active", ctx);
