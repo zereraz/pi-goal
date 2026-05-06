@@ -213,8 +213,19 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		updateFooterStatus(ctx);
 	};
 
-	pi.on("session_start", async (_event, ctx) => reconstructState(ctx));
-	pi.on("session_tree", async (_event, ctx) => reconstructState(ctx));
+	pi.on("session_start", async (_event, ctx) => {
+		reconstructState(ctx);
+		// Resume continuation loop if goal is active (like Codex's ThreadResumed → MaybeContinueIfIdle)
+		if (currentGoal && currentGoal.status === "active") {
+			scheduleContinuation();
+		}
+	});
+	pi.on("session_tree", async (_event, ctx) => {
+		reconstructState(ctx);
+		if (currentGoal && currentGoal.status === "active") {
+			scheduleContinuation();
+		}
+	});
 
 	// ── Wall-clock time tracking ─────────────────────────────────────────
 
