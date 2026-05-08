@@ -5,13 +5,13 @@ Codex-like `/goal` command for [pi](https://github.com/badlogic/pi-mono) — aut
 ## Install
 
 ```bash
-pi install https://github.com/zereraz/pi-goal
+pi install npm:@sahebjot94/pi-goal
 ```
 
-Or temporarily:
+Or via git:
 
 ```bash
-pi -e git:github.com/zereraz/pi-goal
+pi install https://github.com/zereraz/pi-goal
 ```
 
 ## How it works
