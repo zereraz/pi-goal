@@ -217,15 +217,17 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		reconstructState(ctx);
+		syncGoalTools();
 		// Resume continuation loop if goal is active (like Codex's ThreadResumed → MaybeContinueIfIdle)
 		if (currentGoal && currentGoal.status === "active") {
-			scheduleContinuation();
+			scheduleContinuation(ctx);
 		}
 	});
 	pi.on("session_tree", async (_event, ctx) => {
 		reconstructState(ctx);
+		syncGoalTools();
 		if (currentGoal && currentGoal.status === "active") {
-			scheduleContinuation();
+			scheduleContinuation(ctx);
 		}
 	});
 
@@ -237,15 +239,23 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("turn_end", async (_event, ctx) => {
+	pi.on("turn_end", async (event, ctx) => {
 		if (currentGoal && currentGoal.status === "active" && turnStartedAt) {
 			const elapsed = Date.now() - turnStartedAt;
 			currentGoal.timeUsedMs += elapsed;
 			currentGoal.updatedAt = Date.now();
 			turnStartedAt = null;
 
-			// Rough token estimate per turn
-			currentGoal.tokensUsed += 500;
+			// Token counting: use actual usage from assistant message if available
+			const msg = event.message as any;
+			if (msg?.usage?.totalTokens) {
+				currentGoal.tokensUsed += msg.usage.totalTokens;
+			} else if (msg?.usage?.input != null && msg?.usage?.output != null) {
+				currentGoal.tokensUsed += msg.usage.input + msg.usage.output;
+			} else {
+				// Fallback estimate if usage not available
+				currentGoal.tokensUsed += 500;
+			}
 
 			// Check budget
 			if (
@@ -289,27 +299,35 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 			}
 		}
 
-		scheduleContinuation();
+		// Don't schedule if user has pending messages (their input takes priority)
+		if (ctx.hasPendingMessages()) return;
+
+		scheduleContinuation(ctx);
 	});
 
-	function scheduleContinuation() {
+	function scheduleContinuation(ctx?: ExtensionContext) {
 		clearContinuationTimer();
 
 		// Only continue if goal is active
 		if (!currentGoal || currentGoal.status !== "active") return;
 
+		// Don't schedule if agent is busy or user has pending input
+		if (ctx && (!ctx.isIdle() || ctx.hasPendingMessages())) return;
+
+		// Capture goal ID to detect stale continuations
+		const goalCreatedAt = currentGoal.createdAt;
+
 		continuationTimer = setTimeout(() => {
 			continuationTimer = null;
 
-			// Re-check: goal may have been paused/cleared/completed during delay
+			// Re-check: goal may have been paused/cleared/completed/replaced during delay
 			if (!currentGoal || currentGoal.status !== "active") return;
+			if (currentGoal.createdAt !== goalCreatedAt) return; // Goal was replaced
 
-			// Don't send if agent is already streaming (user sent something)
-			// isIdle check prevents collision with user input
 			// Hidden continuation — not shown in chat (like Codex's developer-role message)
 			pi.sendMessage(
 				{ customType: "pi-goal:continuation", content: buildContinuationPrompt(currentGoal), display: false },
-				{ triggerTurn: true },
+				{ triggerTurn: true, deliverAs: "followUp" },
 			);
 		}, CONTINUATION_DELAY_MS);
 	}
@@ -406,6 +424,19 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 			action,
 			goal: currentGoal ? { ...currentGoal } : null,
 		});
+		syncGoalTools();
+	}
+
+	// Hide goal tools from LLM when goal isn't active (prevents unnecessary tool calls)
+	const GOAL_TOOL_NAMES = ["get_goal", "update_goal"];
+	function syncGoalTools() {
+		const want = currentGoal?.status === "active";
+		const active = new Set(pi.getActiveTools());
+		for (const name of GOAL_TOOL_NAMES) {
+			if (want) active.add(name);
+			else active.delete(name);
+		}
+		pi.setActiveTools(Array.from(active));
 	}
 
 	// ── Goal mutation helpers ────────────────────────────────────────────
@@ -452,7 +483,7 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 
 		// If resumed to active, schedule continuation (agent may be idle)
 		if (status === "active") {
-			scheduleContinuation();
+			scheduleContinuation(ctx);
 		}
 	};
 
@@ -634,7 +665,7 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 
 			// Kick off work via hidden continuation (not a visible user message).
 			// Codex: /goal just sets metadata, then the continuation loop starts.
-			scheduleContinuation();
+			scheduleContinuation(ctx);
 		},
 	});
 
