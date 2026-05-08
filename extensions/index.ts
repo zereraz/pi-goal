@@ -64,9 +64,11 @@ class GoalSummaryComponent implements Component {
 		if (goal.status === "active") {
 			this.actions.push({ label: "⏸  Pause goal", key: "pause" });
 			this.actions.push({ label: "✅ Mark complete", key: "complete" });
-		} else if (goal.status === "paused" || goal.status === "budget_limited") {
+		} else if (goal.status === "paused" || goal.status === "budget_limited" || goal.status === "complete") {
 			this.actions.push({ label: "▶  Resume goal", key: "resume" });
-			this.actions.push({ label: "✅ Mark complete", key: "complete" });
+			if (goal.status !== "complete") {
+				this.actions.push({ label: "✅ Mark complete", key: "complete" });
+			}
 		}
 		this.actions.push({ label: "🗑  Clear goal", key: "clear" });
 		this.actions.push({ label: "   Close", key: "close" });
@@ -257,7 +259,7 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 				// Steer agent to wrap up (like Codex's budget_limit steering)
 				pi.sendMessage(
 					{ customType: "pi-goal:budget-limit", content: buildBudgetLimitPrompt(currentGoal), display: false },
-					{ triggerTurn: true },
+					{ triggerTurn: true, deliverAs: "steer" },
 				);
 				return;
 			}
@@ -332,7 +334,6 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event, _ctx) => {
 		if (!currentGoal || currentGoal.status === "complete") return;
 
-		const timeUsedSeconds = Math.floor(currentGoal.timeUsedMs / 1000);
 		const lines = [
 			"",
 			"## Active Goal",
@@ -667,11 +668,9 @@ When marking a budgeted goal complete, report the final token usage to the user.
 				);
 			}
 
-			updateGoalStatus("complete", ctx);
+		updateGoalStatus("complete", ctx);
 
 			const parts = [`Goal complete: ${currentGoal!.objective}`];
-			// currentGoal is now null-ish after complete but we saved before
-			// Actually updateGoalStatus doesn't null it, just changes status
 			if (currentGoal!.tokenBudget) {
 				parts.push(
 					`Tokens: ${formatTokens(currentGoal!.tokensUsed)}/${formatTokens(currentGoal!.tokenBudget)}`,
