@@ -274,8 +274,19 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 	// for no-tool turns (Codex removed that in #20523 because it caused
 	// goals to stop short).
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_end", async (event, ctx) => {
 		updateFooterStatus(ctx);
+
+		// If agent was interrupted (Esc/Ctrl+C), pause the goal (matches Codex)
+		if (currentGoal && currentGoal.status === "active") {
+			const lastMsg = event.messages[event.messages.length - 1];
+			if (lastMsg && "stopReason" in lastMsg && lastMsg.stopReason === "aborted") {
+				updateGoalStatus("paused", ctx);
+				ctx.ui.notify("Goal paused (interrupted). Use /goal resume to continue.", "info");
+				return;
+			}
+		}
+
 		scheduleContinuation();
 	});
 
