@@ -14,6 +14,12 @@ Or via git:
 pi install https://github.com/zereraz/pi-goal
 ```
 
+Temporarily (without installing):
+
+```bash
+pi -e git:github.com/zereraz/pi-goal
+```
+
 ## How it works
 
 ```

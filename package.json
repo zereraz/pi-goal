@@ -1,5 +1,5 @@
 {
-  "name": "@sahebjot94/pi-goal",
+  "name": "pi-goals",
   "version": "0.2.0",
   "description": "Codex-like /goal command for pi — autonomous goal tracking with continuation loops",
   "keywords": [
