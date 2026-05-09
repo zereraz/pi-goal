@@ -1,7 +1,7 @@
 {
-  "name": "pi-goals",
+  "name": "pi-goalie",
   "version": "0.2.0",
-  "description": "Codex-like /goal command for pi — autonomous goal tracking with continuation loops",
+  "description": "Autonomous goal DAG for pi \u2014 Codex-like /goal with dependency chains, steering, and queue management",
   "keywords": [
     "pi-package",
     "pi-extension"
