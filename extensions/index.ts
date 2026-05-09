@@ -656,7 +656,11 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 						"Replace goal?",
 						`Current: ${currentGoal.objective}\nNew: ${objective}`,
 					);
-					if (!replace) return;
+					if (!replace) {
+						// Preserve the typed objective in the editor so user doesn't lose it
+						ctx.ui.setEditorText(`/goal ${trimmed}`);
+						return;
+					}
 				}
 			}
 
