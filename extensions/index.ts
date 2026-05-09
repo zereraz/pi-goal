@@ -646,18 +646,19 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			// Confirm replacement if active goal exists
+			// If there's an active/paused goal, queue the new one instead of replacing
 			if (
 				currentGoal &&
 				currentGoal.status !== "complete"
 			) {
+				// For now: notify that we don't support multiple goals yet
+				// In DAG version this would add to the queue
 				if (ctx.hasUI) {
-					const replace = await ctx.ui.confirm(
-						"Replace goal?",
-						`Current: ${currentGoal.objective}\nNew: ${objective}`,
-					);
-					if (!replace) {
-						// Preserve the typed objective in the editor so user doesn't lose it
+					const choice = await ctx.ui.select("Goal already active", [
+						"Replace current goal",
+						"Cancel",
+					]);
+					if (choice !== "Replace current goal") {
 						ctx.ui.setEditorText(`/goal ${trimmed}`);
 						return;
 					}

@@ -2,11 +2,20 @@
  * Pure helper functions — no pi/tui imports, fully testable standalone.
  */
 
-export type GoalStatus = "active" | "paused" | "complete" | "budget_limited";
+export type GoalStatus =
+	| "active"
+	| "queued"
+	| "paused"
+	| "complete"
+	| "budget_limited";
 
 export interface Goal {
+	/** Stable unique id for DAG edges. */
+	id: string;
 	objective: string;
 	status: GoalStatus;
+	/** IDs of other goals that must be complete before this one can start. */
+	dependencies: string[];
 	createdAt: number;
 	updatedAt: number;
 	tokensUsed: number;
@@ -40,6 +49,8 @@ export function goalStatusLabel(status: GoalStatus): string {
 	switch (status) {
 		case "active":
 			return "🟢 active";
+		case "queued":
+			return "⏳ queued";
 		case "paused":
 			return "⏸ paused";
 		case "complete":
@@ -48,6 +59,56 @@ export function goalStatusLabel(status: GoalStatus): string {
 			return "⚠️ budget limited";
 	}
 }
+
+// ── DAG operations ──────────────────────────────────────────────────────
+
+/** True if all of a goal's dependencies are satisfied (complete) or missing
+ * from the DAG (goal was cleared — treat as complete). */
+export function depsSatisfied(goal: Goal, goals: Goal[]): boolean {
+	for (const depId of goal.dependencies) {
+		const dep = goals.find((g) => g.id === depId);
+		if (!dep) continue; // removed from DAG → treat as satisfied
+		if (dep.status !== "complete") return false;
+	}
+	return true;
+}
+
+/** Returns the currently active goal, if any. At most one goal is active. */
+export function findActive(goals: Goal[]): Goal | null {
+	return goals.find((g) => g.status === "active") ?? null;
+}
+
+/** Returns the next queued goal that is ready to run (deps satisfied, not
+ * paused/budget-limited). Picks the earliest-created ready goal (FIFO). */
+export function findNextReady(goals: Goal[]): Goal | null {
+	const ready = goals
+		.filter((g) => g.status === "queued" && depsSatisfied(g, goals))
+		.sort((a, b) => a.createdAt - b.createdAt);
+	return ready[0] ?? null;
+}
+
+/** Goals that are in the DAG but haven't completed yet. */
+export function pendingGoals(goals: Goal[]): Goal[] {
+	return goals.filter(
+		(g) => g.status !== "complete",
+	);
+}
+
+/** Queue depth = number of goals waiting behind the active one. */
+export function queueDepth(goals: Goal[]): number {
+	return goals.filter(
+		(g) => g.status === "queued" || g.status === "paused" || g.status === "budget_limited",
+	).length;
+}
+
+/** Generate a short id suitable for goal references. */
+export function newGoalId(): string {
+	return (
+		Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+	);
+}
+
+// ── Prompts ─────────────────────────────────────────────────────────────
 
 export function buildContinuationPrompt(goal: Goal): string {
 	const timeUsedSeconds = Math.floor(goal.timeUsedMs / 1000);
