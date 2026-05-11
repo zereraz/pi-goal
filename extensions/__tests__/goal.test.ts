@@ -11,6 +11,11 @@ import {
 	goalStatusLabel,
 	buildContinuationPrompt,
 	buildBudgetLimitPrompt,
+	depsSatisfied,
+	findActive,
+	findNextReady,
+	queueDepth,
+	newGoalId,
 } from "../helpers.ts";
 import type { Goal } from "../helpers.ts";
 
@@ -55,6 +60,7 @@ describe("formatTokens", () => {
 
 describe("goalStatusLabel", () => {
 	test("active", () => assert.equal(goalStatusLabel("active"), "🟢 active"));
+	test("queued", () => assert.equal(goalStatusLabel("queued"), "⏳ queued"));
 	test("paused", () => assert.equal(goalStatusLabel("paused"), "⏸ paused"));
 	test("complete", () => assert.equal(goalStatusLabel("complete"), "✅ complete"));
 	test("budget_limited", () => assert.equal(goalStatusLabel("budget_limited"), "⚠️ budget limited"));
@@ -64,8 +70,10 @@ describe("goalStatusLabel", () => {
 
 function makeGoal(overrides: Partial<Goal> = {}): Goal {
 	return {
+		id: overrides.id ?? "g-" + Math.random().toString(36).slice(2, 8),
 		objective: "Fix the auth bug",
 		status: "active",
+		dependencies: [],
 		createdAt: 0,
 		updatedAt: 0,
 		tokensUsed: 1200,
@@ -108,6 +116,105 @@ describe("buildContinuationPrompt", () => {
 		const prompt = buildContinuationPrompt(makeGoal());
 		assert.match(prompt, /<untrusted_objective>/);
 		assert.match(prompt, /<\/untrusted_objective>/);
+	});
+});
+
+// ── DAG helpers ──────────────────────────────────────────────────────────
+
+describe("depsSatisfied", () => {
+	test("empty deps → satisfied", () => {
+		const g = makeGoal({ id: "a", dependencies: [] });
+		assert.equal(depsSatisfied(g, [g]), true);
+	});
+
+	test("dep complete → satisfied", () => {
+		const a = makeGoal({ id: "a", status: "complete" });
+		const b = makeGoal({ id: "b", status: "queued", dependencies: ["a"] });
+		assert.equal(depsSatisfied(b, [a, b]), true);
+	});
+
+	test("dep still active → not satisfied", () => {
+		const a = makeGoal({ id: "a", status: "active" });
+		const b = makeGoal({ id: "b", status: "queued", dependencies: ["a"] });
+		assert.equal(depsSatisfied(b, [a, b]), false);
+	});
+
+	test("dep missing from DAG → treated as satisfied", () => {
+		const b = makeGoal({ id: "b", status: "queued", dependencies: ["gone"] });
+		assert.equal(depsSatisfied(b, [b]), true);
+	});
+
+	test("any dep incomplete → not satisfied", () => {
+		const a = makeGoal({ id: "a", status: "complete" });
+		const b = makeGoal({ id: "b", status: "paused" });
+		const c = makeGoal({ id: "c", status: "queued", dependencies: ["a", "b"] });
+		assert.equal(depsSatisfied(c, [a, b, c]), false);
+	});
+});
+
+describe("findActive", () => {
+	test("no goals → null", () => assert.equal(findActive([]), null));
+	test("no active → null", () => {
+		const g = makeGoal({ status: "queued" });
+		assert.equal(findActive([g]), null);
+	});
+	test("finds the active goal", () => {
+		const q = makeGoal({ id: "q", status: "queued" });
+		const a = makeGoal({ id: "a", status: "active" });
+		assert.equal(findActive([q, a])?.id, "a");
+	});
+});
+
+describe("findNextReady", () => {
+	test("no queued → null", () => {
+		const a = makeGoal({ status: "active" });
+		assert.equal(findNextReady([a]), null);
+	});
+
+	test("picks earliest ready queued", () => {
+		const a = makeGoal({ id: "a", status: "complete" });
+		const b = makeGoal({ id: "b", status: "queued", createdAt: 200, dependencies: ["a"] });
+		const c = makeGoal({ id: "c", status: "queued", createdAt: 100, dependencies: ["a"] });
+		assert.equal(findNextReady([a, b, c])?.id, "c");
+	});
+
+	test("skips queued with unsatisfied deps", () => {
+		const a = makeGoal({ id: "a", status: "active" });
+		const b = makeGoal({ id: "b", status: "queued", dependencies: ["a"], createdAt: 1 });
+		const c = makeGoal({ id: "c", status: "queued", dependencies: [], createdAt: 2 });
+		assert.equal(findNextReady([a, b, c])?.id, "c");
+	});
+
+	test("ignores paused goals", () => {
+		const p = makeGoal({ id: "p", status: "paused" });
+		assert.equal(findNextReady([p]), null);
+	});
+});
+
+describe("queueDepth", () => {
+	test("counts queued+paused+budget_limited, excludes active and complete", () => {
+		const gs = [
+			makeGoal({ id: "1", status: "active" }),
+			makeGoal({ id: "2", status: "queued" }),
+			makeGoal({ id: "3", status: "queued" }),
+			makeGoal({ id: "4", status: "paused" }),
+			makeGoal({ id: "5", status: "complete" }),
+			makeGoal({ id: "6", status: "budget_limited" }),
+		];
+		assert.equal(queueDepth(gs), 4);
+	});
+});
+
+describe("newGoalId", () => {
+	test("returns non-empty string", () => {
+		const id = newGoalId();
+		assert.equal(typeof id, "string");
+		assert.ok(id.length > 0);
+	});
+	test("ids are unique across calls", () => {
+		const ids = new Set<string>();
+		for (let i = 0; i < 50; i++) ids.add(newGoalId());
+		assert.equal(ids.size, 50);
 	});
 });
 

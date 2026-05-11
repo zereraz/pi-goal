@@ -2,25 +2,32 @@
 
 ## Overview
 
-`pi-goal` implements Codex's `/goal` command for pi. It provides autonomous long-running task execution — the agent keeps working toward an objective until it's achieved, paused, cleared, or budget-exhausted.
+`pi-goal` implements Codex's `/goal` command for pi, extended with a **goal DAG** so users can keep adding objectives without waiting for the current one to finish — like pushing commits to a branch while CI is running. The active goal is never interrupted by new `/goal` invocations; new goals are silently enqueued and activated in order as earlier goals complete.
 
-## Core Behavior: The Continuation Loop
+## Core Behavior: The Continuation Loop + DAG
 
 ```
-/goal <objective>
-  → persist goal (status: active)
+/goal <objective>                         (no active goal)
+  → add goal to DAG as active
   → schedule continuation (2s delay)
-    → send hidden continuation prompt (display:false, deliverAs:followUp)
-      → agent works (visible streaming, tool calls)
-        → turn_end: account time + tokens
-        → agent_end: schedule next continuation
-          → loop repeats
+    → hidden continuation prompt
+      → agent works → turn_end → account time+tokens
+        → agent_end → schedule next continuation → loop
+
+/goal <another>                           (while previous is active)
+  → add goal to DAG as queued with dependency on active goal
+  → do NOT interrupt the active loop
+  → no confirmation prompt — it's just a new DAG node
+
+active goal: update_goal(status:"complete")
+  → mark complete → find next ready queued goal
+  → promote to active → restart continuation loop on it
 ```
 
-**Loop terminates when:**
-- Agent calls `update_goal(status: "complete")`
+**Active-goal loop terminates when:**
+- Agent calls `update_goal(status: "complete")` — next ready goal in the DAG (if any) activates automatically
 - User runs `/goal pause` or `/goal clear`
-- User presses Esc/Ctrl+C (auto-pauses goal)
+- User presses Esc/Ctrl+C (auto-pauses active goal)
 - Token budget exhausted (status → `budget_limited`, wrap-up prompt sent)
 - User sends input during 2s delay (cancels pending continuation)
 
@@ -28,32 +35,34 @@
 
 | Command | Behavior |
 |---|---|
-| `/goal <objective>` | Set new goal, start loop. Confirms replacement if active goal exists. |
-| `/goal <objective> --budget 50k` | Set goal with token budget. Supports k/K/m/M suffixes. |
-| `/goal` | Interactive menu (pause/resume/complete/clear) |
+| `/goal <objective>` | Add goal to DAG. If no active goal, it becomes active immediately. Otherwise it's enqueued with a dependency on the active goal. **No confirmation prompt** — new goals never replace or interrupt existing ones. |
+| `/goal <objective> --budget 50k` | Same as above, with token budget. Supports k/K/m/M suffixes. |
+| `/goal` | Interactive DAG menu (pause/resume/complete active / clear all) |
 | `/goal status` | Same as bare `/goal` |
-| `/goal pause` | Pause goal, stop continuation loop |
-| `/goal resume` | Resume paused/budget-limited/completed goal, restart loop |
-| `/goal clear` | Remove goal entirely, clear status bar |
+| `/goal pause` | Pause active goal, stop continuation loop |
+| `/goal resume` | Re-activate the most recent non-complete goal (or promote a ready queued one) |
+| `/goal clear` | Remove **all** goals, clear status bar |
 
 ## Tools (LLM-facing)
 
 ### `update_goal`
 
 - **Only accepts** `status: "complete"`
+- Operates on the **active** goal only
+- Completing the active goal triggers automatic promotion of the next ready queued goal
 - Agent cannot pause/resume/clear — those are user-controlled
-- Hidden from LLM when goal is not active (`syncGoalTools`)
+- Hidden from LLM when no goal is active (`syncGoalTools`)
 - Must report final time and token usage to user on completion
 
 ### `get_goal`
 
-- Returns: objective, status, time_used_seconds, tokens_used, token_budget, remaining_tokens
+- Returns: `active` (or null), `dag` (all goals with id, status, dependencies, time/token usage), `queued_count`
 - Read-only, no side effects
-- Hidden from LLM when goal is not active
+- Hidden from LLM when no goal is active
 
 ## System Prompt Injection
 
-When goal is active/paused/budget_limited, appended to system prompt each turn:
+When a goal is active/paused/budget_limited, appended to system prompt each turn (active goal only):
 
 ```
 ## Active Goal
@@ -62,11 +71,14 @@ Status: <status>
 Time elapsed: <formatted>
 Tokens used: <formatted>
 Token budget: <budget> (<remaining> remaining)
+Queued goals waiting: <n>
 
-Stay focused on this goal. Use update_goal to mark it complete when the objective is achieved.
+Stay focused on this goal. Use update_goal to mark it complete when the
+objective is achieved. When you complete this goal, the next queued goal
+(if any) will activate automatically — do not switch focus until then.
 ```
 
-Not injected when goal is `complete`.
+Only the active goal is injected; queued goals are not surfaced to the agent beyond the count, so focus is preserved.
 
 ## Continuation Prompt (hidden, developer-role equivalent)
 
@@ -123,12 +135,13 @@ Do not call update_goal unless the goal is actually complete.
 
 | Status | Display |
 |---|---|
-| Active (with budget) | `Pursuing goal (12.5K / 50K)` |
-| Active (no budget) | `Pursuing goal (2m)` |
+| Active (with budget) | `Pursuing goal (12.5K / 50K) [+2 queued]` |
+| Active (no budget) | `Pursuing goal (2m) [+1 queued]` |
 | Paused | `Goal paused (/goal resume)` |
 | Budget limited | `Goal unmet (63.9K / 50K tokens)` |
 | Complete (with budget) | `Goal achieved (40K tokens)` |
 | Complete (no budget) | `Goal achieved (10h 12m)` |
+| No active, DAG non-empty | `Goal DAG idle [+N queued]` |
 | Cleared | *(nothing)* |
 
 Status persists until explicit `/goal clear`. Never auto-fades.
@@ -139,38 +152,47 @@ Status persists until explicit `/goal clear`. Never auto-fades.
 |---|---|
 | Pending user input | `ctx.hasPendingMessages()` — skip continuation |
 | Agent busy | `ctx.isIdle()` — don't schedule if streaming |
-| Stale goal | `createdAt` check — cancel if goal was replaced during delay |
-| User interrupt | `stopReason: "aborted"` detection → auto-pause |
+| Stale goal | `goal.id` check — cancel if active changed/cleared during delay |
+| User interrupt | `stopReason: "aborted"` detection → auto-pause active goal |
 | User types during delay | `input` event → `clearContinuationTimer()` |
+| Queued goal promotion | only promoted when dependencies are all `complete` (missing deps treated as satisfied) |
 | No suppression | No-tool turns still continue (Codex #20523) |
+| No replace prompt | DAG model — new goals are nodes, not replacements; the old `Replace goal?` confirmation has been removed |
 
 ## State Persistence
 
-Stored as pi custom session entries (`customType: "pi-goal"`):
+Stored as pi custom session entries (`customType: "pi-goal"`). Each mutation snapshots the entire DAG so replay is trivial (just take the last entry):
 
 ```typescript
 interface GoalEntry {
-  action: "set" | "update" | "clear";
-  goal: Goal | null;
+  action: "add" | "update" | "activate" | "complete" | "clear";
+  goals: Goal[];  // full DAG snapshot after the action
 }
 
 interface Goal {
+  id: string;             // stable, unique within session
   objective: string;
-  status: "active" | "paused" | "complete" | "budget_limited";
-  createdAt: number;      // epoch ms — also serves as goal ID
-  updatedAt: number;      // epoch ms
+  status: "active" | "queued" | "paused" | "complete" | "budget_limited";
+  dependencies: string[]; // goal ids that must complete before this can run
+  createdAt: number;
+  updatedAt: number;
   tokensUsed: number;     // actual from usage, fallback +500/turn
   tokenBudget: number | null;
   timeUsedMs: number;     // wall-clock while active
 }
 ```
 
+**DAG invariants:**
+- At most one goal has `status: "active"` at any time.
+- `/goal <obj>` appends a new node. If some goal is active, the new node gets `dependencies: [activeId]` and `status: "queued"`, forming an implicit chain.
+- When the active goal transitions out of `active` (complete/paused/cleared/budget_limited), `maybePromoteNext` picks the earliest-created queued goal whose dependencies are all complete (or absent from the DAG) and activates it.
+
 Reconstructed from session branch on startup/tree navigation.
 
 ## Tool Visibility
 
 `get_goal` and `update_goal` are dynamically shown/hidden via `pi.setActiveTools()`:
-- **Visible** when `goal.status === "active"`
+- **Visible** whenever any goal has `status: "active"`
 - **Hidden** otherwise (prevents LLM from calling them on unrelated turns)
 
 ## Validation
