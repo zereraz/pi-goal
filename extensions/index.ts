@@ -473,11 +473,21 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		const a = active();
 		const id = newGoalId();
 
+		// Determine if this goal should queue or activate:
+		// - If there's an active goal → queue behind it
+		// - If there are paused/budget_limited/queued goals → queue behind the last one
+		// - Only activate immediately if the DAG is truly empty or all complete
+		const pendingGoals = goals.filter(
+			(g) => g.status === "active" || g.status === "queued" || g.status === "paused" || g.status === "budget_limited",
+		);
+		const shouldQueue = pendingGoals.length > 0;
+		const lastPending = pendingGoals[pendingGoals.length - 1];
+
 		const goal: Goal = {
 			id,
 			objective,
-			status: a ? "queued" : "active",
-			dependencies: a ? [a.id] : [],
+			status: shouldQueue ? "queued" : "active",
+			dependencies: lastPending ? [lastPending.id] : [],
 			createdAt: now,
 			updatedAt: now,
 			tokensUsed: 0,
@@ -489,8 +499,8 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		persistGoal("add");
 		updateFooterStatus(ctx);
 
-		// If we just activated, kick off the continuation loop.
-		if (!a) scheduleContinuation(ctx);
+		// If we just activated (nothing pending), kick off the continuation loop.
+		if (!shouldQueue) scheduleContinuation(ctx);
 
 		return goal;
 	};
@@ -508,9 +518,11 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		g.updatedAt = Date.now();
 
 		if (wasActive && status !== "active") {
-			// Active slot freed — maybe promote the next ready goal.
 			clearContinuationTimer();
-			maybePromoteNext(ctx);
+			// Only promote next goal on completion — pause/budget_limited should stop the DAG
+			if (status === "complete") {
+				maybePromoteNext(ctx);
+			}
 		}
 
 		if (status === "active") {
@@ -729,12 +741,11 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 
 			// DAG model: adding a new goal never replaces the active one and never
 			// interrupts current work. No confirmation prompt needed.
-			const wasActive = active();
 			const goal = addGoal(objective, tokenBudget, ctx);
 
-			if (wasActive) {
+			if (goal.status === "queued") {
 				ctx.ui.notify(
-					`📥 Queued goal: ${goal.objective} (will start after active goal completes)`,
+					`📥 Queued goal: ${goal.objective}`,
 					"info",
 				);
 			} else {
