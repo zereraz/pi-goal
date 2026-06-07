@@ -602,14 +602,10 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		const a = active();
 		const id = newGoalId();
 
-		// Anything pending blocks auto-activation: active, queued, paused,
-		// budget_limited. Only abandoned/complete don't count.
+		// Only active or queued goals block auto-activation. Paused and
+		// budget_limited goals are user-suspended — they shouldn't gate new goals.
 		const hasPending = goals.some(
-			(g) =>
-				g.status === "active" ||
-				g.status === "queued" ||
-				g.status === "paused" ||
-				g.status === "budget_limited",
+			(g) => g.status === "active" || g.status === "queued",
 		);
 
 		let activatedNow = false;
