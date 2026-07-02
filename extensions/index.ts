@@ -412,7 +412,12 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		if (userSuspended) return;
 		const a = active();
 		if (!a) return;
-		if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
+		// DO NOT gate on ctx.isIdle() here: agent_end is emitted INSIDE the run
+		// lifecycle, before isStreaming flips false (pi-agent-core finishRun runs
+		// after event processing). Gating at schedule time made this check fail
+		// on EVERY agent_end — the debounced continuation never fired once and
+		// the goal loop was structurally dead after the first turn. Check idle
+		// state at FIRE time instead, when the run has actually finished.
 
 		const goalId = a.id;
 		continuationTimer = setTimeout(() => {
@@ -420,6 +425,13 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 			const a2 = active();
 			if (!a2 || a2.id !== goalId) return;
 			if (userSuspended) return;
+			try {
+				// If a newer turn is in flight or messages are queued, skip — that
+				// turn's own agent_end will reschedule us.
+				if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
+			} catch {
+				return; // ctx no longer valid (reload/shutdown)
+			}
 			pendingGoalContinuations += 1;
 			pi.sendMessage(
 				{
