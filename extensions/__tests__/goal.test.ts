@@ -10,7 +10,6 @@ import {
 	formatTokens,
 	goalStatusLabel,
 	buildContinuationPrompt,
-	buildBudgetLimitPrompt,
 	findActive,
 	findNextQueued,
 	queueDepth,
@@ -64,8 +63,6 @@ describe("goalStatusLabel", () => {
 	test("paused", () => assert.equal(goalStatusLabel("paused"), "⏸ paused"));
 	test("complete", () => assert.equal(goalStatusLabel("complete"), "✅ complete"));
 	test("abandoned", () => assert.equal(goalStatusLabel("abandoned"), "🚫 abandoned"));
-	test("budget_limited", () =>
-		assert.equal(goalStatusLabel("budget_limited"), "⚠️ budget limited"));
 });
 
 // ── continuation prompt ──────────────────────────────────────────────────
@@ -78,7 +75,6 @@ function makeGoal(overrides: Partial<Goal> = {}): Goal {
 		createdAt: 0,
 		updatedAt: 0,
 		tokensUsed: 1200,
-		tokenBudget: 50_000,
 		timeUsedMs: 120_000,
 		...overrides,
 	};
@@ -101,20 +97,17 @@ describe("buildContinuationPrompt", () => {
 		assert.match(prompt, /300s/);
 	});
 
-	test("includes token budget and remaining (non-first)", () => {
+	test("includes tokens used as progress (non-first)", () => {
 		const prompt = buildContinuationPrompt(
-			makeGoal({ tokensUsed: 10_000, tokenBudget: 50_000 }),
+			makeGoal({ tokensUsed: 10_000 }),
 			false,
 		);
-		assert.match(prompt, /Tokens used \(output only\): 10000/);
-		assert.match(prompt, /Token budget: 50000/);
-		assert.match(prompt, /Tokens remaining: 40000/);
+		assert.match(prompt, /10000 output tokens/);
 	});
 
-	test("unlimited budget says unlimited (non-first)", () => {
-		const prompt = buildContinuationPrompt(makeGoal({ tokenBudget: null }), false);
-		assert.match(prompt, /Token budget: unlimited/);
-		assert.match(prompt, /Tokens remaining: unlimited/);
+	test("never mentions token budget", () => {
+		const prompt = buildContinuationPrompt(makeGoal(), false);
+		assert.doesNotMatch(prompt, /budget/i);
 	});
 
 	test("mentions update_goal", () => {
@@ -157,27 +150,25 @@ describe("findNextQueued", () => {
 		assert.equal(findNextQueued([a, b, c])?.id, "c");
 	});
 
-	test("ignores paused/budget_limited/abandoned", () => {
+	test("ignores paused/abandoned", () => {
 		const p = makeGoal({ id: "p", status: "paused", createdAt: 1 });
-		const b = makeGoal({ id: "b", status: "budget_limited", createdAt: 2 });
 		const x = makeGoal({ id: "x", status: "abandoned", createdAt: 3 });
 		const q = makeGoal({ id: "q", status: "queued", createdAt: 4 });
-		assert.equal(findNextQueued([p, b, x, q])?.id, "q");
+		assert.equal(findNextQueued([p, x, q])?.id, "q");
 	});
 });
 
 describe("queueDepth", () => {
-	test("counts queued+paused+budget_limited, excludes active/complete/abandoned", () => {
+	test("counts queued+paused, excludes active/complete/abandoned", () => {
 		const gs = [
 			makeGoal({ id: "1", status: "active" }),
 			makeGoal({ id: "2", status: "queued" }),
 			makeGoal({ id: "3", status: "queued" }),
 			makeGoal({ id: "4", status: "paused" }),
 			makeGoal({ id: "5", status: "complete" }),
-			makeGoal({ id: "6", status: "budget_limited" }),
 			makeGoal({ id: "7", status: "abandoned" }),
 		];
-		assert.equal(queueDepth(gs), 4);
+		assert.equal(queueDepth(gs), 3);
 	});
 });
 
@@ -207,29 +198,5 @@ describe("newGoalId", () => {
 		const ids = new Set<string>();
 		for (let i = 0; i < 50; i++) ids.add(newGoalId());
 		assert.equal(ids.size, 50);
-	});
-});
-
-describe("buildBudgetLimitPrompt", () => {
-	test("includes objective", () => {
-		const prompt = buildBudgetLimitPrompt(makeGoal());
-		assert.match(prompt, /Fix the auth bug/);
-	});
-
-	test("says budget_limited", () => {
-		const prompt = buildBudgetLimitPrompt(makeGoal());
-		assert.match(prompt, /budget_limited/);
-	});
-
-	test("includes token budget", () => {
-		const prompt = buildBudgetLimitPrompt(
-			makeGoal({ tokenBudget: 50_000, tokensUsed: 50_000 }),
-		);
-		assert.match(prompt, /Token budget: 50000/);
-	});
-
-	test("says do not start new work", () => {
-		const prompt = buildBudgetLimitPrompt(makeGoal());
-		assert.match(prompt, /do not start new substantive work/i);
 	});
 });
