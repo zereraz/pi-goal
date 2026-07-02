@@ -52,12 +52,13 @@ interface GoalEntry {
 	goals: Goal[];
 }
 
-const CONTINUATION_DEBOUNCE_MS = 2000;
+// Timings are env-overridable so lifecycle tests can run fast.
+const CONTINUATION_DEBOUNCE_MS = Number(process.env.PI_GOAL_DEBOUNCE_MS ?? 2000);
 /** Longer delay before retrying after a turn error (throttle/transient). */
-const ERROR_RETRY_DELAY_MS = 10_000;
+const ERROR_RETRY_DELAY_MS = Number(process.env.PI_GOAL_ERROR_RETRY_MS ?? 10_000);
 /** Grace period after Esc before the goal loop resumes — long enough to
  * type a steering message or /goal pause. */
-const ABORT_RESUME_DELAY_MS = 5_000;
+const ABORT_RESUME_DELAY_MS = Number(process.env.PI_GOAL_ABORT_RESUME_MS ?? 5_000);
 /** Consecutive turn errors tolerated before the loop suspends. */
 const MAX_CONSECUTIVE_ERRORS = 3;
 const CONTINUATION_CUSTOM_TYPE = "pi-goal:continuation";
