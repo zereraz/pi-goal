@@ -31,7 +31,7 @@ pi -e git:github.com/zereraz/pi-goal
 3. After 2s idle, a **continuation prompt** auto-sends — agent keeps going
 4. Loop continues until the agent calls `update_goal(status: "complete")` or you `/goal pause`
 
-Messages you type while a goal is active are treated as **steering within the goal** — the agent answers, then the loop resumes with your input absorbed as context. Only **Esc** (interrupt) or 3 consecutive turn errors suspend the loop (with a visible notification); `/goal continue` resumes it.
+Messages you type while a goal is active are treated as **steering within the goal** — the agent answers, then the loop resumes with your input absorbed as context. **Esc** interrupts the current turn but the loop resumes after 5s (grace window to type steering or `/goal pause`). Only 3 consecutive turn errors suspend the loop (with a visible notification); `/goal continue` resumes it. Stopping is always explicit: `/goal pause` or `/goal clear`.
 
 The agent sees the active goal in its system prompt every turn, gets `update_goal` and `get_goal` tools, and receives a structured continuation prompt with the objective and completion audit instructions.
 
@@ -60,7 +60,7 @@ There's no `Replace goal?` confirmation — a new `/goal` is appended to the que
 | `/goal pause` | Pause the active goal |
 | `/goal resume` | Resume the most recent paused goal (or activate the next queued one) |
 | `/goal next` / `/goal skip` | Abandon the active goal and advance to the next queued one |
-| `/goal continue` | Re-enable continuation nudges after Esc or repeated errors |
+| `/goal continue` | Re-enable continuation nudges after repeated errors |
 | `/goal complete` | Mark the active goal complete |
 | `/goal clear` | Clear **all** goals |
 | `/goal status` | Show status |

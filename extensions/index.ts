@@ -22,8 +22,9 @@
  *   a clean system prompt — agent answers what user actually asked.
  * - First continuation after /goal is delivered immediately (queueMicrotask).
  *   Subsequent continuations debounce 2s after agent_end.
- * - Esc / abort IS the explicit stop signal → suspends nudges (with a visible
- *   notification) until /goal continue.
+ * - Esc / abort does NOT stop the goal (Codex: abort only accounts progress).
+ *   The loop resumes after a 5s grace window — time to type steering or
+ *   /goal pause. Stopping is explicit: /goal pause / /goal clear.
  * - Turn errors retry with a 10s backoff; after 3 consecutive errors the loop
  *   suspends loudly instead of silently (and instead of error-looping).
  * - Token accounting uses per-turn output tokens charged to the goal active at
@@ -54,6 +55,9 @@ interface GoalEntry {
 const CONTINUATION_DEBOUNCE_MS = 2000;
 /** Longer delay before retrying after a turn error (throttle/transient). */
 const ERROR_RETRY_DELAY_MS = 10_000;
+/** Grace period after Esc before the goal loop resumes — long enough to
+ * type a steering message or /goal pause. */
+const ABORT_RESUME_DELAY_MS = 5_000;
 /** Consecutive turn errors tolerated before the loop suspends. */
 const MAX_CONSECUTIVE_ERRORS = 3;
 const CONTINUATION_CUSTOM_TYPE = "pi-goal:continuation";
@@ -504,15 +508,18 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 			}
 		}
 
-		// Esc (abort) is the explicit stop signal — suspend until /goal continue.
-		// (Codex parallel: user-facing pause. Plain input does NOT do this.)
+		// Esc (abort) does NOT suspend — Codex semantics: turn abort only
+		// accounts progress; the goal continues on next idle. The common pattern
+		// is Esc → type steering → expect the loop to keep going. We resume
+		// after a longer grace delay so the user has time to type (their input
+		// clears the timer, and their turn's agent_end reschedules) or to
+		// /goal pause if they actually want to stop.
 		if (lastAssistantStop === "aborted") {
-			userSuspended = true;
-			clearContinuationTimer();
 			ctx.ui.notify(
-				"Goal continuations suspended (interrupted). Use /goal continue to resume.",
+				`Interrupted — goal still active, resuming in ${ABORT_RESUME_DELAY_MS / 1000}s. Use /goal pause to stop.`,
 				"info",
 			);
+			scheduleContinuationDebounced(ctx, ABORT_RESUME_DELAY_MS);
 			return;
 		}
 
