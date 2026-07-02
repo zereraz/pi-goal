@@ -31,9 +31,11 @@ pi -e git:github.com/zereraz/pi-goal
 3. After 2s idle, a **continuation prompt** auto-sends — agent keeps going
 4. Loop continues until the agent calls `update_goal(status: "complete")` or you `/goal pause`
 
-The agent sees the active goal in its system prompt every turn, gets `update_goal` and `get_goal` tools, and receives a structured continuation prompt (ported from Codex) with objective, budgets, and completion audit instructions.
+Messages you type while a goal is active are treated as **steering within the goal** — the agent answers, then the loop resumes with your input absorbed as context. Only **Esc** (interrupt) or 3 consecutive turn errors suspend the loop (with a visible notification); `/goal continue` resumes it.
 
-### Stacking goals (DAG)
+The agent sees the active goal in its system prompt every turn, gets `update_goal` and `get_goal` tools, and receives a structured continuation prompt with the objective and completion audit instructions.
+
+### Stacking goals (queue)
 
 You don't have to wait for the current goal to finish before queuing the next one — like adding commits to a branch while CI is running:
 
@@ -43,34 +45,37 @@ You don't have to wait for the current goal to finish before queuing the next on
 /goal Write docs             ← queued silently behind that
 ```
 
-The agent stays focused on the active goal. New `/goal` invocations land in the DAG with a dependency on the currently active goal, and never interrupt ongoing work. When the active goal completes (`update_goal`), pi-goal automatically promotes the next ready queued goal (one whose dependencies are all `complete`) and starts the continuation loop on it.
+The agent stays focused on the active goal. New `/goal` invocations join a simple FIFO queue and never interrupt ongoing work. When the active goal completes (`update_goal`) — or you run `/goal next` to skip it — pi-goal automatically promotes the next queued goal (earliest first) and starts the continuation loop on it.
 
-There's no `Replace goal?` confirmation anymore — you're adding a node to a graph, not replacing a single slot.
+There's no `Replace goal?` confirmation — a new `/goal` is appended to the queue, not a replacement. Use `/goal --replace <objective>` if you explicitly want to abandon the active goal and start fresh.
 
 ## Commands
 
 | Command | Action |
 |---|---|
 | `/goal <objective>` | Add goal. Becomes active if no active goal; otherwise queued behind the active one. |
-| `/goal <objective> --budget 50k` | Same, with token budget |
-| `/goal` | Interactive DAG menu |
+| `/goal --replace <objective>` | Abandon the active goal and start this one immediately |
+| `/goal --queue <objective>` | Force-queue, even if nothing is active |
+| `/goal` | Interactive menu (active goal + queue) |
 | `/goal pause` | Pause the active goal |
-| `/goal resume` | Resume the most recent non-complete goal (or activate a ready queued one) |
+| `/goal resume` | Resume the most recent paused goal (or activate the next queued one) |
+| `/goal next` / `/goal skip` | Abandon the active goal and advance to the next queued one |
+| `/goal continue` | Re-enable continuation nudges after Esc or repeated errors |
+| `/goal complete` | Mark the active goal complete |
 | `/goal clear` | Clear **all** goals |
 | `/goal status` | Show status |
 
 ## What the agent gets
 
-- **System prompt**: Goal objective, status, time/token budget injected each turn
+- **System prompt**: Goal objective + status injected each turn (only while a goal is active)
 - **`update_goal` tool**: Mark goal `complete` — pause/resume are user-controlled
-- **`get_goal` tool**: Read current goal status and budgets
-- **Continuation prompt**: Budget info + completion audit checklist (from Codex)
-- **Budget limit**: When token budget exceeded, goal auto-pauses with wrap-up instructions
+- **`get_goal` tool**: Read the active goal and the queue
+- **Continuation prompt**: Objective + completion audit checklist, re-sent after each idle turn
 
 ## Footer status
 
 ```
-🎯 Refactor auth module to... [2m • 1.5K/50K] [+2 queued]
-⏸ Refactor auth module to... (paused)
-⚠️ Refactor auth module to... (budget limited)
+🎯 Goal active (2m) [+2 queued]
+⏸ Goal paused
+✅ Goal complete
 ```

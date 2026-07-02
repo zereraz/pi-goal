@@ -4,25 +4,28 @@
  * Model: simple FIFO queue. One goal active at a time. New goals queue.
  *
  * Commands:
- * - /goal <objective> [--budget N]   set or queue a goal
+ * - /goal <objective>                 set or queue a goal
  * - /goal --replace <objective>      abandon active, set new one immediately
  * - /goal --queue <objective>        explicit queue (same as /goal X with active)
  * - /goal next | /goal skip          abandon active, promote next queued
  * - /goal complete                   user marks active complete, promote next
  * - /goal pause | /goal resume       suspend / wake the active goal
- * - /goal continue                   re-enable continuation nudges after side conv
+ * - /goal continue                   re-enable continuation nudges after Esc/errors
  * - /goal clear                      wipe everything
  * - /goal                            open status menu
  *
- * Steering rules:
- * - Continuation message ONLY fires when the previous turn was itself a
- *   continuation (or the goal was just set). Side conversations don't trigger
- *   continuations.
+ * Steering rules (Codex-aligned):
+ * - User input does NOT suspend the goal. Messages typed while a goal is
+ *   active are steering WITHIN the goal; after the agent answers, the
+ *   continuation loop resumes (Codex: continue_if_idle on every thread idle).
  * - System prompt injection happens ONLY on continuation turns. User turns get
  *   a clean system prompt — agent answers what user actually asked.
  * - First continuation after /goal is delivered immediately (queueMicrotask).
  *   Subsequent continuations debounce 2s after agent_end.
- * - Esc / abort does NOT auto-pause. User decides.
+ * - Esc / abort IS the explicit stop signal → suspends nudges (with a visible
+ *   notification) until /goal continue.
+ * - Turn errors retry with a 10s backoff; after 3 consecutive errors the loop
+ *   suspends loudly instead of silently (and instead of error-looping).
  * - Token accounting uses per-turn output tokens charged to the goal active at
  *   turn_start (so promotion mid-turn doesn't bleed cost into the next goal).
  */
@@ -36,7 +39,6 @@ import {
 	formatTokens,
 	goalStatusLabel,
 	buildContinuationPrompt,
-	buildBudgetLimitPrompt,
 	findActive,
 	findNextQueued,
 	queueDepth,
@@ -50,8 +52,11 @@ interface GoalEntry {
 }
 
 const CONTINUATION_DEBOUNCE_MS = 2000;
+/** Longer delay before retrying after a turn error (throttle/transient). */
+const ERROR_RETRY_DELAY_MS = 10_000;
+/** Consecutive turn errors tolerated before the loop suspends. */
+const MAX_CONSECUTIVE_ERRORS = 3;
 const CONTINUATION_CUSTOM_TYPE = "pi-goal:continuation";
-const BUDGET_LIMIT_CUSTOM_TYPE = "pi-goal:budget-limit";
 
 // ============================================================================
 // Status menu
@@ -101,9 +106,7 @@ class GoalSummaryComponent implements Component {
 		} else if (next) {
 			this.actions.push({ label: "▶  Activate next queued", key: "resume" });
 		}
-		const pausedExists = goals.some(
-			(g) => g.status === "paused" || g.status === "budget_limited",
-		);
+		const pausedExists = goals.some((g) => g.status === "paused");
 		if (!a && pausedExists) {
 			this.actions.push({ label: "▶  Resume paused goal", key: "resume" });
 		}
@@ -178,12 +181,7 @@ class GoalSummaryComponent implements Component {
 			);
 			const meta: string[] = [];
 			meta.push(`time ${formatElapsed(g.timeUsedMs)}`);
-			if (g.tokenBudget !== null) {
-				const pct = Math.round((g.tokensUsed / g.tokenBudget) * 100);
-				meta.push(
-					`tokens ${formatTokens(g.tokensUsed)}/${formatTokens(g.tokenBudget)} (${pct}%)`,
-				);
-			} else if (g.tokensUsed > 0) {
+			if (g.tokensUsed > 0) {
 				meta.push(`tokens ${formatTokens(g.tokensUsed)}`);
 			}
 			lines.push(truncateToWidth(`      ${th.fg("muted", meta.join(" · "))}`, width));
@@ -242,8 +240,20 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 	 * nudge again if THIS invocation was goal-driven).
 	 */
 	let goalDrivenInvocation = false;
-	/** True if user steered away — continuations stay paused until /goal continue. */
+	/** True only after an explicit stop signal (Esc) or repeated errors —
+	 * continuations stay paused until /goal continue. Plain user input does
+	 * NOT suspend (Codex semantics: steering is fuel, not departure). */
 	let userSuspended = false;
+	/** Consecutive goal turns that ended in error — reset on any clean turn. */
+	let consecutiveErrors = 0;
+	/** Number of goal continuation messages we've queued via pi.sendMessage but
+	 * whose triggered invocation hasn't yet started. Consumed (decremented) in
+	 * before_agent_start so that goalDrivenInvocation is set on the right
+	 * invocation, even when the continuation was queued while another (non-goal)
+	 * invocation was still in flight. Without this counter the in-flight
+	 * invocation's agent_end would prematurely consume + reset the flag, and the
+	 * goal's first turn would lose the system-prompt goal augmentation. */
+	let pendingGoalContinuations = 0;
 	/** Number of consecutive continuations without external input. */
 	let consecutiveContinuations = 0;
 
@@ -254,6 +264,25 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 	let turnGoalId: string | null = null;
 
 	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
+	/** 1Hz ticker so the footer's elapsed counter actually advances during a
+	 * long-running turn (otherwise we'd display the persisted timeUsedMs which
+	 * only updates on turn_end — the "0s active bug"). */
+	let footerTicker: ReturnType<typeof setInterval> | null = null;
+	let footerCtx: ExtensionContext | null = null;
+
+	function startFooterTicker() {
+		if (footerTicker || !footerCtx) return;
+		footerTicker = setInterval(() => {
+			if (!footerCtx) return;
+			updateFooterStatus(footerCtx);
+		}, 1000);
+	}
+	function stopFooterTicker() {
+		if (footerTicker) {
+			clearInterval(footerTicker);
+			footerTicker = null;
+		}
+	}
 
 	// ── Helpers ─────────────────────────────────────────────────────────
 
@@ -298,7 +327,9 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		turnStartedAt = null;
 		turnGoalId = null;
 		goalDrivenInvocation = false;
+		pendingGoalContinuations = 0;
 		userSuspended = false;
+		consecutiveErrors = 0;
 		consecutiveContinuations = 0;
 		clearContinuationTimer();
 
@@ -306,10 +337,20 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 			if (entry.type !== "custom" || entry.customType !== "pi-goal") continue;
 			const data = entry.data as GoalEntry | undefined;
 			if (!data) continue;
-			// Strip legacy `dependencies` field if present in old snapshots.
+			// Migrate legacy snapshots: drop removed fields (`dependencies`,
+			// `tokenBudget`) and map the removed `budget_limited` status — now an
+			// invalid state — onto `paused` so old sessions still reconstruct and
+			// the queue can still be advanced/resumed.
 			goals = data.goals.map((g) => {
-				const { ...rest } = g as Goal & { dependencies?: unknown };
+				const { ...rest } = g as Goal & {
+					dependencies?: unknown;
+					tokenBudget?: unknown;
+				};
 				delete (rest as { dependencies?: unknown }).dependencies;
+				delete (rest as { tokenBudget?: unknown }).tokenBudget;
+				if ((rest.status as string) === "budget_limited") {
+					rest.status = "paused";
+				}
 				return rest;
 			});
 		}
@@ -342,7 +383,11 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 			const a2 = active();
 			if (!a2) return;
 			if (userSuspended) return;
-			goalDrivenInvocation = true;
+			// Don't set goalDrivenInvocation here — the in-flight (non-goal)
+			// invocation's agent_end would consume + reset it before our
+			// followUp turn even starts. Use the counter instead; it's drained
+			// in before_agent_start of the actual goal turn.
+			pendingGoalContinuations += 1;
 			pi.sendMessage(
 				{
 					customType: CONTINUATION_CUSTOM_TYPE,
@@ -354,8 +399,11 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		});
 	}
 
-	/** Debounced re-prompt after the agent finishes a continuation turn. */
-	function scheduleContinuationDebounced(ctx: ExtensionContext) {
+	/** Debounced re-prompt after the agent finishes a turn. */
+	function scheduleContinuationDebounced(
+		ctx: ExtensionContext,
+		delayMs: number = CONTINUATION_DEBOUNCE_MS,
+	) {
 		clearContinuationTimer();
 		if (userSuspended) return;
 		const a = active();
@@ -368,7 +416,7 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 			const a2 = active();
 			if (!a2 || a2.id !== goalId) return;
 			if (userSuspended) return;
-			goalDrivenInvocation = true;
+			pendingGoalContinuations += 1;
 			pi.sendMessage(
 				{
 					customType: CONTINUATION_CUSTOM_TYPE,
@@ -377,12 +425,12 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 				},
 				{ triggerTurn: true, deliverAs: "followUp" },
 			);
-		}, CONTINUATION_DEBOUNCE_MS);
+		}, delayMs);
 	}
 
 	// ── Turn lifecycle ──────────────────────────────────────────────────
 
-	pi.on("turn_start", async (_event, _ctx) => {
+	pi.on("turn_start", async (_event, ctx) => {
 		if (goalDrivenInvocation) {
 			consecutiveContinuations += 1;
 		} else {
@@ -393,6 +441,9 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		if (a) {
 			turnStartedAt = Date.now();
 			turnGoalId = a.id;
+			// Refresh footer + start the 1Hz ticker so the elapsed counter
+			// advances visibly during this turn (fixes "0s active" bug).
+			updateFooterStatus(ctx);
 		} else {
 			turnStartedAt = null;
 			turnGoalId = null;
@@ -429,27 +480,6 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		if (turnTokens <= 0) turnTokens = 100; // tiny fallback so something accrues
 		charged.tokensUsed += turnTokens;
 
-		// Budget check — only if charged goal is still the active one.
-		if (
-			charged.status === "active" &&
-			charged.tokenBudget !== null &&
-			charged.tokensUsed >= charged.tokenBudget
-		) {
-			charged.status = "budget_limited";
-			charged.updatedAt = Date.now();
-			persistGoal("update");
-			updateFooterStatus(ctx);
-			pi.sendMessage(
-				{
-					customType: BUDGET_LIMIT_CUSTOM_TYPE,
-					content: buildBudgetLimitPrompt(charged),
-					display: false,
-				},
-				{ triggerTurn: true, deliverAs: "steer" },
-			);
-			return;
-		}
-
 		persistGoal("update");
 		updateFooterStatus(ctx);
 	});
@@ -458,18 +488,12 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 
 	pi.on("agent_end", async (event, ctx) => {
 		updateFooterStatus(ctx);
-		const wasGoalDriven = goalDrivenInvocation;
 		// Reset the per-invocation flag now that the invocation is fully done.
 		goalDrivenInvocation = false;
 
 		const a = active();
 		if (!a) return;
 
-		// If the agent was interrupted (Esc) or hit an error, treat it as a
-		// signal to stop nudging. The goal stays active (user didn't pause it),
-		// but continuations suspend until the user explicitly /goal continue or
-		// /goal resume. Without this, pressing Esc would just delay the same
-		// continuation by 2s and re-fire it.
 		const messages = event.messages ?? [];
 		let lastAssistantStop: string | undefined;
 		for (let i = messages.length - 1; i >= 0; i--) {
@@ -479,39 +503,77 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 				break;
 			}
 		}
-		if (lastAssistantStop === "aborted" || lastAssistantStop === "error") {
+
+		// Esc (abort) is the explicit stop signal — suspend until /goal continue.
+		// (Codex parallel: user-facing pause. Plain input does NOT do this.)
+		if (lastAssistantStop === "aborted") {
 			userSuspended = true;
 			clearContinuationTimer();
-			if (lastAssistantStop === "aborted") {
-				ctx.ui.notify(
-					"Goal continuations suspended (interrupted). Use /goal continue to resume.",
-					"info",
-				);
-			}
+			ctx.ui.notify(
+				"Goal continuations suspended (interrupted). Use /goal continue to resume.",
+				"info",
+			);
 			return;
 		}
 
-		// Only re-prompt if THIS just-finished invocation was itself goal-driven.
-		if (!wasGoalDriven) return;
+		// Turn error (throttle, network, provider). Don't die silently on the
+		// first one — retry with a longer delay. Only suspend (loudly) after
+		// several consecutive failures, to avoid an error loop burning tokens
+		// (Codex blocks the goal on turn error for the same reason).
+		if (lastAssistantStop === "error") {
+			consecutiveErrors += 1;
+			if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+				userSuspended = true;
+				clearContinuationTimer();
+				ctx.ui.notify(
+					`Goal suspended after ${consecutiveErrors} consecutive errors. Use /goal continue to resume.`,
+					"warning",
+				);
+				return;
+			}
+			ctx.ui.notify(
+				`Goal turn errored (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS}) — retrying in ${ERROR_RETRY_DELAY_MS / 1000}s`,
+				"info",
+			);
+			scheduleContinuationDebounced(ctx, ERROR_RETRY_DELAY_MS);
+			return;
+		}
+
+		// Clean turn — reset the error streak.
+		consecutiveErrors = 0;
+
+		// Continue after ANY clean turn while a goal is active — including
+		// user-driven ones. User messages are steering within the goal, not a
+		// departure from it (Codex: continue_if_idle fires on every thread
+		// idle). The agent answers the user, then the goal loop resumes with
+		// that steering absorbed as context.
 		if (userSuspended) return;
 		if (ctx.hasPendingMessages()) return;
 
 		scheduleContinuationDebounced(ctx);
 	});
 
-	// ── User input → suspend continuations ──────────────────────────────
+	// ── User input ───────────────────────────────────────────────────────
 
 	pi.on("input", async (_event, _ctx) => {
-		// User just typed something. Stop nudging until they say /goal continue.
+		// User typed something — clear any pending nudge so it doesn't race
+		// their turn. Do NOT suspend: the continuation reschedules at agent_end
+		// once their turn completes (steering is fuel, not departure).
 		clearContinuationTimer();
-		if (active()) {
-			userSuspended = true;
-		}
 	});
 
 	// ── System prompt injection — only on continuation turns ────────────
 
 	pi.on("before_agent_start", async (event, _ctx) => {
+		// Drain a pending goal continuation onto THIS invocation. Done here
+		// (rather than synchronously when we call sendMessage) so the flag
+		// lands on the actual goal turn, not on whatever invocation happened
+		// to be in flight when /goal was issued.
+		if (pendingGoalContinuations > 0) {
+			pendingGoalContinuations -= 1;
+			goalDrivenInvocation = true;
+		}
+
 		const a = active();
 		if (!a) return;
 		// Inject goal context only on goal-driven invocations. User invocations
@@ -524,12 +586,6 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 			`Objective: ${a.objective}`,
 			`Status: ${a.status}`,
 		];
-		if (a.tokenBudget !== null) {
-			const remaining = Math.max(0, a.tokenBudget - a.tokensUsed);
-			lines.push(
-				`Token budget: ${formatTokens(a.tokenBudget)} (${formatTokens(remaining)} remaining)`,
-			);
-		}
 		const qd = queueDepth(goals);
 		if (qd > 0) lines.push(`${qd} goal(s) queued behind this one.`);
 		lines.push("");
@@ -543,9 +599,11 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 	// ── Footer status ───────────────────────────────────────────────────
 
 	function updateFooterStatus(ctx: ExtensionContext) {
+		footerCtx = ctx; // remember latest ctx so the ticker can refresh
 		const a = active();
 		if (!a && goals.every((g) => g.status === "complete" || g.status === "abandoned")) {
 			ctx.ui.setStatus("goal", undefined);
+			stopFooterTicker();
 			return;
 		}
 		const qd = queueDepth(goals);
@@ -553,30 +611,30 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		const susp = userSuspended ? " (suspended)" : "";
 		if (!a) {
 			ctx.ui.setStatus("goal", `Goals idle${suffix}`);
+			stopFooterTicker();
 			return;
 		}
-		const elapsed = formatElapsed(a.timeUsedMs);
-		const tokens = a.tokenBudget
-			? `${formatTokens(a.tokensUsed)}/${formatTokens(a.tokenBudget)}`
-			: formatTokens(a.tokensUsed);
+		// Live elapsed: persisted time + wall-clock of any in-flight turn that
+		// is being charged to THIS goal. Without this, the footer reads "0s"
+		// for the entire duration of a long turn (e.g. multi-minute bench/train
+		// turns on RTX rigs) because timeUsedMs only updates on turn_end.
+		const inFlightMs =
+			turnStartedAt !== null && turnGoalId === a.id
+				? Math.max(0, Date.now() - turnStartedAt)
+				: 0;
+		const liveMs = a.timeUsedMs + inFlightMs;
+		const elapsed = formatElapsed(liveMs);
+		// Run the 1Hz ticker only while a turn is actually in flight on the
+		// active goal — outside a turn the displayed elapsed is constant.
+		if (a.status === "active" && inFlightMs > 0) startFooterTicker();
+		else stopFooterTicker();
 
 		switch (a.status) {
 			case "active":
-				ctx.ui.setStatus(
-					"goal",
-					a.tokenBudget
-						? `Goal active (${tokens})${suffix}${susp}`
-						: `Goal active (${elapsed})${suffix}${susp}`,
-				);
+				ctx.ui.setStatus("goal", `Goal active (${elapsed})${suffix}${susp}`);
 				break;
 			case "paused":
 				ctx.ui.setStatus("goal", `Goal paused${suffix}`);
-				break;
-			case "budget_limited":
-				ctx.ui.setStatus(
-					"goal",
-					a.tokenBudget ? `Goal budget hit (${tokens})${suffix}` : `Goal budget hit${suffix}`,
-				);
 				break;
 			case "complete":
 				ctx.ui.setStatus("goal", `Goal complete${suffix}`);
@@ -594,7 +652,6 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 
 	function addGoal(
 		objective: string,
-		tokenBudget: number | null,
 		ctx: ExtensionContext,
 		mode: "auto" | "queue" | "replace",
 	): { goal: Goal; activatedNow: boolean } {
@@ -602,8 +659,8 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		const a = active();
 		const id = newGoalId();
 
-		// Only active or queued goals block auto-activation. Paused and
-		// budget_limited goals are user-suspended — they shouldn't gate new goals.
+		// Only active or queued goals block auto-activation. Paused goals are
+		// user-suspended — they shouldn't gate new goals.
 		const hasPending = goals.some(
 			(g) => g.status === "active" || g.status === "queued",
 		);
@@ -614,7 +671,7 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 			a.updatedAt = now;
 			activatedNow = true;
 		} else if (mode === "auto") {
-			// Activate only if nothing is pending (queue empty AND no paused/budget_limited).
+			// Activate only if nothing is pending (queue empty AND no paused).
 			activatedNow = !hasPending;
 		} else if (mode === "queue") {
 			// Explicit queue: never auto-activate, even if queue is empty.
@@ -628,13 +685,13 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 			createdAt: now,
 			updatedAt: now,
 			tokensUsed: 0,
-			tokenBudget,
 			timeUsedMs: 0,
 		};
 		goals.push(goal);
 
 		// Reset suspension on any explicit goal action.
 		userSuspended = false;
+		consecutiveErrors = 0;
 		consecutiveContinuations = 0;
 
 		persistGoal("add");
@@ -673,6 +730,7 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		// engagement — reset suspension so the new active actually gets nudged.
 		if ((status === "active" && !wasActive) || promoted) {
 			userSuspended = false;
+			consecutiveErrors = 0;
 			consecutiveContinuations = 0;
 		}
 
@@ -699,6 +757,7 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		clearContinuationTimer();
 		goals = [];
 		userSuspended = false;
+		consecutiveErrors = 0;
 		consecutiveContinuations = 0;
 		goalDrivenInvocation = false;
 		persistGoal("clear");
@@ -757,9 +816,9 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 					ctx.ui.notify("A goal is already active", "info");
 					return;
 				}
-				// Prefer paused/budget_limited (most-recently-updated), else next queued.
+				// Prefer paused (most-recently-updated), else next queued.
 				const candidates = goals
-					.filter((g) => g.status === "paused" || g.status === "budget_limited")
+					.filter((g) => g.status === "paused")
 					.sort((a, b) => b.updatedAt - a.updatedAt);
 				const target = candidates[0] ?? findNextQueued(goals);
 				if (!target) {
@@ -781,6 +840,7 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 					return;
 				}
 				userSuspended = false;
+				consecutiveErrors = 0;
 				ctx.ui.notify("Continuation nudges re-enabled", "info");
 				sendContinuationImmediate(ctx);
 				return;
@@ -849,7 +909,7 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 					case "resume": {
 						if (active()) break;
 						const candidates = goals
-							.filter((g) => g.status === "paused" || g.status === "budget_limited")
+							.filter((g) => g.status === "paused")
 							.sort((x, y) => y.updatedAt - x.updatedAt);
 						const target = candidates[0] ?? findNextQueued(goals);
 						if (target) {
@@ -878,6 +938,7 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 						break;
 					case "continue":
 						userSuspended = false;
+						consecutiveErrors = 0;
 						ctx.ui.notify("Continuation nudges re-enabled", "info");
 						if (active()) sendContinuationImmediate(ctx);
 						break;
@@ -891,7 +952,7 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			// /goal [--replace|--queue] <objective> [--budget N]
+			// /goal [--replace|--queue] <objective>
 			let mode: "auto" | "queue" | "replace" = "auto";
 			let rest = trimmed;
 
@@ -907,22 +968,10 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 				}
 			}
 
-			let tokenBudget: number | null = null;
-			const budgetMatch = rest.match(/--budget\s+(\d+[kKmM]?)\s*/);
-			if (budgetMatch) {
-				const budgetStr = budgetMatch[1].toLowerCase();
-				let budget = Number.parseInt(budgetStr, 10);
-				if (budgetStr.endsWith("k")) budget = Number.parseInt(budgetStr, 10) * 1000;
-				else if (budgetStr.endsWith("m"))
-					budget = Number.parseInt(budgetStr, 10) * 1_000_000;
-				tokenBudget = budget;
-				rest = rest.replace(/--budget\s+\d+[kKmM]?\s*/, "").trim();
-			}
-
 			let objective = rest.trim();
 			if (!objective) {
 				ctx.ui.notify(
-					"Usage: /goal [--replace|--queue] <objective> [--budget N]",
+					"Usage: /goal [--replace|--queue] <objective>",
 					"info",
 				);
 				return;
@@ -934,7 +983,7 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			const { goal, activatedNow } = addGoal(objective, tokenBudget, ctx, mode);
+			const { goal, activatedNow } = addGoal(objective, ctx, mode);
 
 			if (activatedNow) {
 				if (mode === "replace") {
@@ -958,7 +1007,7 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		label: "Update Goal",
 		description: `Mark the active goal complete when its objective is fully achieved.
 Set status to "complete" only when every requirement of the objective has been verified against the actual state of the project (files, tests, command output).
-Do not mark complete because budget is exhausted, you are stopping work, or progress feels good. Pause/resume/budget changes are controlled by the user, not this tool.
+Do not mark complete because you are stopping work or progress feels good. Pause and resume are controlled by the user, not this tool.
 When marked complete, the next queued goal (if any) activates automatically.`,
 		promptSnippet: "update_goal: Mark the active goal complete when achieved",
 		parameters: Type.Object({
@@ -980,20 +1029,14 @@ When marked complete, the next queued goal (if any) activates automatically.`,
 			setStatus(completed.id, "complete", ctx);
 
 			const parts = [`Goal complete: ${completed.objective}`];
-			if (completed.tokenBudget) {
-				parts.push(
-					`Tokens: ${formatTokens(completed.tokensUsed)}/${formatTokens(completed.tokenBudget)}`,
-				);
-			} else {
-				parts.push(`Tokens: ${formatTokens(completed.tokensUsed)}`);
-			}
+			parts.push(`Tokens: ${formatTokens(completed.tokensUsed)}`);
 			parts.push(`Time: ${formatElapsed(completed.timeUsedMs)}`);
 
 			const nextActive = active();
 			if (nextActive && nextActive.id !== completed.id) {
 				parts.push(`Next goal activated: ${nextActive.objective}`);
 			} else if (queueDepth(goals) > 0) {
-				parts.push(`${queueDepth(goals)} goal(s) still paused/budget-limited.`);
+				parts.push(`${queueDepth(goals)} goal(s) still paused.`);
 			}
 
 			return {
@@ -1009,7 +1052,7 @@ When marked complete, the next queued goal (if any) activates automatically.`,
 		name: "get_goal",
 		label: "Get Goal",
 		description:
-			"Inspect the active goal and the queue (status, time used, tokens used vs. budget).",
+			"Inspect the active goal and the queue (status, time used, tokens used).",
 		promptSnippet: "get_goal: Check the active goal + queue",
 		parameters: Type.Object({}),
 		async execute(_id, _p, _s, _u, _ctx) {
@@ -1026,9 +1069,6 @@ When marked complete, the next queued goal (if any) activates automatically.`,
 				status: g.status,
 				time_used_seconds: Math.floor(g.timeUsedMs / 1000),
 				tokens_used: g.tokensUsed,
-				token_budget: g.tokenBudget,
-				remaining_tokens:
-					g.tokenBudget !== null ? Math.max(0, g.tokenBudget - g.tokensUsed) : null,
 			});
 			const info = {
 				active: a ? describe(a) : null,
@@ -1052,6 +1092,8 @@ When marked complete, the next queued goal (if any) activates automatically.`,
 
 	pi.on("session_shutdown", async () => {
 		clearContinuationTimer();
+		stopFooterTicker();
+		footerCtx = null;
 		turnStartedAt = null;
 		turnGoalId = null;
 	});
