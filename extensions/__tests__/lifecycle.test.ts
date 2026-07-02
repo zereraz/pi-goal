@@ -275,3 +275,100 @@ describe("goal loop lifecycle", () => {
 		assert.ok(fake.continuations().length >= 2, "resume restarts the loop");
 	});
 });
+
+// ── Queue robustness ───────────────────────────────────────────────────────
+
+describe("queue lifecycle", () => {
+	let fake: FakePi;
+
+	beforeEach(async () => {
+		fake = await makeExtension();
+	});
+
+	test("three goals chain A→B→C via update_goal completions", async () => {
+		await fake.command("goal", "goal A");
+		await fake.command("goal", "goal B");
+		await fake.command("goal", "goal C");
+		await sleep(5);
+		const update = fake.tools.get("update_goal")!;
+
+		await update.execute("1", { status: "complete" }, undefined, undefined, fake.ctx);
+		await sleep(WAIT);
+		assert.ok(
+			fake.continuations().some((c) => c.msg.content.includes("goal B")),
+			"B activated after A",
+		);
+
+		await update.execute("2", { status: "complete" }, undefined, undefined, fake.ctx);
+		await sleep(WAIT);
+		assert.ok(
+			fake.continuations().some((c) => c.msg.content.includes("goal C")),
+			"C activated after B",
+		);
+
+		// C completes → queue empty → loop stops cleanly.
+		await update.execute("3", { status: "complete" }, undefined, undefined, fake.ctx);
+		const count = fake.continuations().length;
+		await fake.runInvocation("stop");
+		await sleep(WAIT);
+		assert.equal(fake.continuations().length, count, "no zombie continuations");
+	});
+
+	test("/goal next abandons active and starts the queued goal", async () => {
+		await fake.command("goal", "goal A");
+		await fake.command("goal", "goal B");
+		await sleep(5);
+		await fake.command("goal", "next");
+		await sleep(WAIT);
+		assert.ok(
+			fake.continuations().some((c) => c.msg.content.includes("goal B")),
+			"B gets its continuation after /goal next",
+		);
+	});
+
+	test("promotion works even while error-suspended", async () => {
+		await fake.command("goal", "goal A");
+		await fake.command("goal", "goal B");
+		await sleep(5);
+		// Suspend the loop via 3 consecutive errors.
+		for (let i = 0; i < 3; i++) {
+			await fake.runInvocation("error");
+			await sleep(150);
+		}
+		// Completing A must still promote B AND clear the suspension.
+		const update = fake.tools.get("update_goal")!;
+		await update.execute("1", { status: "complete" }, undefined, undefined, fake.ctx);
+		await sleep(WAIT);
+		assert.ok(
+			fake.continuations().some((c) => c.msg.content.includes("goal B")),
+			"promotion must clear suspension — queued goal cannot stall",
+		);
+	});
+
+	test("goal queued while a turn is in flight still activates cleanly", async () => {
+		await fake.command("goal", "goal A");
+		await sleep(5);
+		// Queue B mid-turn (streaming), then finish the turn.
+		fake.streaming = true;
+		await fake.command("goal", "goal B");
+		fake.streaming = false;
+		const update = fake.tools.get("update_goal")!;
+		await update.execute("1", { status: "complete" }, undefined, undefined, fake.ctx);
+		await sleep(WAIT);
+		assert.ok(
+			fake.continuations().some((c) => c.msg.content.includes("goal B")),
+			"mid-flight queued goal activates on completion",
+		);
+	});
+
+	test("--replace abandons active and starts the new goal immediately", async () => {
+		await fake.command("goal", "goal A");
+		await sleep(5);
+		await fake.command("goal", "--replace goal Z");
+		await sleep(WAIT);
+		assert.ok(
+			fake.continuations().some((c) => c.msg.content.includes("goal Z")),
+			"replacement goal starts immediately",
+		);
+	});
+});
