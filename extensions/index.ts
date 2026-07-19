@@ -261,6 +261,12 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 	let pendingGoalContinuations = 0;
 	/** Number of consecutive continuations without external input. */
 	let consecutiveContinuations = 0;
+	/** Set when the last goal turn hit the output limit without emitting any tools.
+	 * The goal is still active, but auto-continuation must stop until the user
+	 * compacts or steers; otherwise we burn tokens on a context-full stall. */
+	let lengthStalled = false;
+	/** Number of consecutive length-truncated no-op turns. */
+	let consecutiveLengthStalls = 0;
 
 	// ── Per-turn accounting ─────────────────────────────────────────────
 	let turnStartedAt: number | null = null;
@@ -336,6 +342,8 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		userSuspended = false;
 		consecutiveErrors = 0;
 		consecutiveContinuations = 0;
+		lengthStalled = false;
+		consecutiveLengthStalls = 0;
 		clearContinuationTimer();
 
 		for (const entry of ctx.sessionManager.getBranch()) {
@@ -411,6 +419,7 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 	) {
 		clearContinuationTimer();
 		if (userSuspended) return;
+		if (lengthStalled) return; // guard: don't auto-continue while stalled
 		const a = active();
 		if (!a) return;
 		// DO NOT gate on ctx.isIdle() here: agent_end is emitted INSIDE the run
@@ -497,6 +506,20 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		if (turnTokens <= 0) turnTokens = 100; // tiny fallback so something accrues
 		charged.tokensUsed += turnTokens;
 
+		// Detect context-full stalls: the model hit the output limit without
+		// emitting any tools, so the goal made no progress this turn.
+		const assistantContent = (event.message as any)?.content ?? [];
+		const hadToolUse = assistantContent.some(
+			(b: any) => b?.type === "tool_use",
+		);
+		const stopReason = (event.message as any)?.stopReason;
+		if (stopReason === "length" && !hadToolUse) {
+			lengthStalled = true;
+			consecutiveLengthStalls += 1;
+		} else {
+			consecutiveLengthStalls = 0;
+		}
+
 		persistGoal("update");
 		updateFooterStatus(ctx);
 	});
@@ -562,6 +585,26 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		// Clean turn — reset the error streak.
 		consecutiveErrors = 0;
 
+		// Context-full stall: the previous turn was truncated by the output
+		// limit and produced no tools. Don't keep spinning — that just burns
+		// tokens on the same bloated context. Surface it and wait for the user
+		// to compact or steer. The goal status stays active.
+		if (lengthStalled) {
+			clearContinuationTimer();
+			if (consecutiveLengthStalls >= 2) {
+				ctx.ui.notify(
+					`Goal stalled: the model's context is too full to act (${consecutiveLengthStalls} consecutive truncated turns). Compact the conversation or send a steering message.`,
+					"warning",
+				);
+			} else {
+				ctx.ui.notify(
+					"Goal turn was truncated (context nearly full). Halting auto-continuation until you compact or steer.",
+					"warning",
+				);
+			}
+			return;
+		}
+
 		// Continue after ANY clean turn while a goal is active — including
 		// user-driven ones. User messages are steering within the goal, not a
 		// departure from it (Codex: continue_if_idle fires on every thread
@@ -580,6 +623,10 @@ export default function piGoalExtension(pi: ExtensionAPI) {
 		// their turn. Do NOT suspend: the continuation reschedules at agent_end
 		// once their turn completes (steering is fuel, not departure).
 		clearContinuationTimer();
+		// User steering also clears a context stall so the next turn can try
+		// again (hopefully after they've compacted or narrowed the context).
+		lengthStalled = false;
+		consecutiveLengthStalls = 0;
 	});
 
 	// ── System prompt injection — only on continuation turns ────────────

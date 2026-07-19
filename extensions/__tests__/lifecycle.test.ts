@@ -113,6 +113,25 @@ class FakePi {
 		this.streaming = false; // finishRun() — AFTER agent_end processing
 	}
 
+	async runInvocationWithContent(
+		stopReason: "stop" | "aborted" | "error" | "length",
+		content: Array<{ type: string; [k: string]: unknown }>,
+		usage: Record<string, number> = { output: 1 },
+	) {
+		this.streaming = true;
+		await this.emit("before_agent_start", { systemPrompt: "" });
+		await this.emit("turn_start", {});
+		const message = {
+			role: "assistant",
+			stopReason,
+			content,
+			usage,
+		};
+		await this.emit("turn_end", { message });
+		await this.emit("agent_end", { messages: [message] });
+		this.streaming = false;
+	}
+
 	async command(name: string, args: string) {
 		const cmd = this.commands.get(name);
 		assert.ok(cmd, `command ${name} not registered`);
@@ -273,6 +292,53 @@ describe("goal loop lifecycle", () => {
 		await fake.command("goal", "resume");
 		await sleep(WAIT);
 		assert.ok(fake.continuations().length >= 2, "resume restarts the loop");
+	});
+
+	test("REGRESSION(length-stall): length with no tools halts auto-continuation and notifies", async () => {
+		const count = fake.continuations().length;
+		await fake.runInvocationWithContent("length", [{ type: "thinking", thinking: "The" }]);
+		await sleep(WAIT);
+		assert.equal(
+			fake.continuations().length,
+			count,
+			"must not auto-continue after a length-no-tools stall",
+		);
+		assert.ok(
+			fake.notifications.some(
+				(n) => n.level === "warning" && n.message.includes("truncated"),
+			),
+			"user must be warned about the stall",
+		);
+	});
+
+	test("user input clears a length stall", async () => {
+		await fake.runInvocationWithContent("length", [{ type: "thinking", thinking: "The" }]);
+		await sleep(WAIT);
+		const count = fake.continuations().length;
+		await fake.emit("input", { text: "compact and continue" });
+		await fake.runInvocation("stop");
+		await sleep(WAIT);
+		assert.ok(
+			fake.continuations().length > count,
+			"loop must resume after user input clears the stall",
+		);
+	});
+
+	test("length with tool_use does NOT stall", async () => {
+		const count = fake.continuations().length;
+		await fake.runInvocationWithContent(
+			"length",
+			[
+				{ type: "thinking", thinking: "Need to run cmd" },
+				{ type: "tool_use", name: "bash", input: { command: "echo hi" } },
+			],
+		);
+		await sleep(WAIT);
+		assert.equal(
+			fake.continuations().length,
+			count + 1,
+			"length turn that emitted tools is a normal clean turn",
+		);
 	});
 });
 
